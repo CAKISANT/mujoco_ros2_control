@@ -449,7 +449,7 @@ namespace mujoco_rgbd_camera {
 
         if (color_image_publisher_) {
             cv_ptr->image = color_image_;
-            cv_ptr->encoding = "8UC3";
+            cv_ptr->encoding = "rgb8";
             cv_ptr->toImageMsg(out_image);
             out_image.header.stamp = stamp_;
             out_image.header.frame_id = color_frame_;
