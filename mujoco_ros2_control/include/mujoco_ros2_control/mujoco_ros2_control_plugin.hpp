@@ -59,7 +59,11 @@
 #include <map>
 #include <mutex>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
+#include <chrono>
+#include <condition_variable>
+#include <optional>
 
 // ROS
 #include "rclcpp/rclcpp.hpp"
@@ -85,6 +89,7 @@
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rosgraph_msgs/msg/clock.hpp"
 #include "std_srvs/srv/trigger.hpp"
 
@@ -238,6 +243,29 @@ namespace mujoco_ros2_control
         void mujocoResetCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                  std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
+        /**
+         * @brief Service /sim/puck_reset: places the free puck at its model origin with zero velocity.
+         *
+         * The simulation thread applies the reset between physics steps. The response is sent after
+         * it has been applied, or with success=false if that takes longer than kPuckResetTimeout
+         * (for example while the simulation is paused).
+         */
+        void puckResetCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                               std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
+        /**
+         * @brief Topic /sim/puck_shot: queues a one-shot puck velocity, applied at the next physics step.
+         *
+         * The frame must be "world" (the MuJoCo world frame). Angular velocity is set to zero.
+         */
+        void puckShotCallback(const geometry_msgs::msg::TwistStamped::SharedPtr message);
+
+        /** @brief Applies queued puck commands. Called by the simulation thread between physics steps. */
+        void applyPendingPuckCommands();
+
+        /** @brief Restores the puck free joint to its model origin and zeroes its velocity. Requires sim_mutex_. */
+        void resetPuckToOrigin();
+
         std::shared_ptr<rclcpp::Node> nh_; ///< ROS2 node handle
 
         // Parameters from ROS2 using generate_parameter_library
@@ -258,6 +286,18 @@ namespace mujoco_ros2_control
         // Mujoco ros services
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mujoco_play_pause_service_; ///< Service to pause the Mujoco simulation
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mujoco_reset_service_; ///< Service to reset the Mujoco simulation
+
+        // Puck control for the air-hockey model (free joint "puck_free", body "playfield").
+        rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr puck_reset_service_; ///< /sim/puck_reset
+        rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr puck_shot_subscription_; ///< /sim/puck_shot
+        int puck_joint_id_{-1}; ///< Free-joint id of the puck, -1 if the model has no such joint
+        // Requests from the service and topic callbacks, consumed by the simulation thread.
+        std::mutex puck_command_mutex_;
+        std::condition_variable puck_command_cv_;
+        bool puck_reset_pending_{false};
+        uint64_t puck_reset_requested_count_{0}; ///< Incremented for each accepted reset request
+        uint64_t puck_reset_applied_count_{0}; ///< Latest reset request applied to mujoco_data_
+        std::optional<geometry_msgs::msg::TwistStamped> puck_shot_pending_; ///< Latest unapplied shot
 
         // Mujoco-related variables
         mjModel* mujoco_model_{}; ///< Pointer to the Mujoco model

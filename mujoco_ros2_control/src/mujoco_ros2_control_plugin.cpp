@@ -53,6 +53,11 @@
 // We use a midpoint RT priority to allow maximum flexibility to users
 int const kSchedPriority = 50;
 
+// The puck hooks assume the air-hockey model has a free joint named "puck_free".
+char const kPuckJointName[] = "puck_free";
+// How long /sim/puck_reset waits for the simulation thread to apply the reset.
+auto const kPuckResetTimeout = std::chrono::seconds(2);
+
 namespace mujoco_ros2_control {
 MujocoRos2Control::MujocoRos2Control(rclcpp::Node::SharedPtr &node) : nh_(node) {
   // set up the parameter listener
@@ -90,6 +95,24 @@ MujocoRos2Control::MujocoRos2Control(rclcpp::Node::SharedPtr &node) : nh_(node) 
   pub_clock_frequency_ = params_.clock_publisher_frequency;
 
   init_mujoco();
+
+  // The puck hooks need the free puck joint.
+  puck_joint_id_ = mj_name2id(mujoco_model_, mjOBJ_JOINT, kPuckJointName);
+  if (puck_joint_id_ >= 0 && mujoco_model_->jnt_type[puck_joint_id_] != mjJNT_FREE) {
+    RCLCPP_WARN(nh_->get_logger(), "Joint '%s' is not a free joint; puck hooks are disabled", kPuckJointName);
+    puck_joint_id_ = -1;
+  }
+  if (puck_joint_id_ < 0) {
+    RCLCPP_WARN(nh_->get_logger(),
+                "Model has no free joint '%s'; /sim/puck_reset and /sim/puck_shot will be refused",
+                kPuckJointName);
+  }
+  puck_reset_service_ = nh_->create_service<std_srvs::srv::Trigger>(
+      "/sim/puck_reset",
+      std::bind(&MujocoRos2Control::puckResetCallback, this, std::placeholders::_1, std::placeholders::_2));
+  puck_shot_subscription_ = nh_->create_subscription<geometry_msgs::msg::TwistStamped>(
+      "/sim/puck_shot", rclcpp::SystemDefaultsQoS(),
+      std::bind(&MujocoRos2Control::puckShotCallback, this, std::placeholders::_1));
 
   init_controller_manager();
 
@@ -173,6 +196,9 @@ void MujocoRos2Control::update() {
       last_pub_clock_time_ = 0.0;
       reset_notify_publisher_->publish(std_msgs::msg::Empty());
     }
+
+    // Apply queued /sim/puck_reset and /sim/puck_shot requests between physics steps.
+    applyPendingPuckCommands();
 
     mjtNum simstart = mujoco_data_->time;
     timespec currentTime{};
@@ -559,6 +585,107 @@ void mujoco_ros2_control::MujocoRos2Control::mujocoResetCallback(const std::shar
   reset_requested_.store(true);
   response->success = true;
   response->message = "Simulation reset requested.";
+}
+
+void mujoco_ros2_control::MujocoRos2Control::puckResetCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+  (void)request;
+  if (puck_joint_id_ < 0) {
+    response->success = false;
+    response->message = "Model has no free puck joint; nothing was reset.";
+    return;
+  }
+
+  std::unique_lock<std::mutex> lock(puck_command_mutex_);
+  // A reset discards any shot queued before it, so the puck is not launched from its old position.
+  puck_shot_pending_.reset();
+  puck_reset_pending_ = true;
+  const uint64_t ticket = ++puck_reset_requested_count_;
+  const bool applied = puck_command_cv_.wait_for(lock, kPuckResetTimeout, [this, ticket] {
+    return puck_reset_applied_count_ >= ticket;
+  });
+  response->success = applied;
+  response->message = applied
+      ? "Puck reset to its origin."
+      : "Puck reset was not applied within 2 s; the simulation may be paused. It applies when the simulation runs.";
+}
+
+void mujoco_ros2_control::MujocoRos2Control::puckShotCallback(
+    const geometry_msgs::msg::TwistStamped::SharedPtr message) {
+  if (puck_joint_id_ < 0) {
+    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot: model has no free puck joint");
+    return;
+  }
+  const std::string & frame = message->header.frame_id;
+  if (frame != "world") {
+    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot in frame '%s'; use 'world'", frame.c_str());
+    return;
+  }
+  const auto & linear = message->twist.linear;
+  if (!std::isfinite(linear.x) || !std::isfinite(linear.y) || !std::isfinite(linear.z)) {
+    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot with a non-finite velocity");
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(puck_command_mutex_);
+  puck_shot_pending_ = *message;
+}
+
+void mujoco_ros2_control::MujocoRos2Control::applyPendingPuckCommands() {
+  bool reset = false;
+  uint64_t reset_ticket = 0;
+  std::optional<geometry_msgs::msg::TwistStamped> shot;
+  {
+    std::lock_guard<std::mutex> lock(puck_command_mutex_);
+    if (!puck_reset_pending_ && !puck_shot_pending_) {
+      return;
+    }
+    reset = puck_reset_pending_;
+    reset_ticket = puck_reset_requested_count_;
+    puck_reset_pending_ = false;
+    shot.swap(puck_shot_pending_);
+  }
+
+  {
+    // The reset runs first, so a shot queued with a reset starts from the origin.
+    std::lock_guard<std::mutex> sim_lock(sim_mutex_);
+    if (reset) {
+      resetPuckToOrigin();
+    }
+    if (shot) {
+      // The shot is already in the MuJoCo world frame, so it is written directly.
+      const auto & linear = shot->twist.linear;
+      const int dof_adr = mujoco_model_->jnt_dofadr[puck_joint_id_];
+      mujoco_data_->qvel[dof_adr + 0] = linear.x;
+      mujoco_data_->qvel[dof_adr + 1] = linear.y;
+      mujoco_data_->qvel[dof_adr + 2] = linear.z;
+      for (int i = 3; i < 6; ++i) {
+        mujoco_data_->qvel[dof_adr + i] = 0.0;
+      }
+    }
+  }
+
+  if (reset) {
+    std::lock_guard<std::mutex> lock(puck_command_mutex_);
+    puck_reset_applied_count_ = reset_ticket;
+    puck_command_cv_.notify_all();
+  }
+}
+
+void mujoco_ros2_control::MujocoRos2Control::resetPuckToOrigin() {
+  const int qpos_adr = mujoco_model_->jnt_qposadr[puck_joint_id_];
+  const int dof_adr = mujoco_model_->jnt_dofadr[puck_joint_id_];
+  // A free joint has 7 position values (xyz and quaternion) and 6 velocity values.
+  // qpos0 holds the body pose from the MJCF, which is the table-centre origin for the puck.
+  for (int i = 0; i < 7; ++i) {
+    mujoco_data_->qpos[qpos_adr + i] = mujoco_model_->qpos0[qpos_adr + i];
+  }
+  for (int i = 0; i < 6; ++i) {
+    mujoco_data_->qvel[dof_adr + i] = 0.0;
+    mujoco_data_->qacc_warmstart[dof_adr + i] = 0.0;
+  }
+  mj_forward(mujoco_model_, mujoco_data_);
 }
 }  // namespace mujoco_ros2_control
 

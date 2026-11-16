@@ -305,7 +305,12 @@ A depth-camera node can be mounted in two ways. Both publish the same topics and
 
 #### From a `<camera>` element (fixed FOV)
 
-Every MuJoCo `<camera>` declared under a `<reference>` body automatically spawns a depth-camera node named after the camera. The body the camera lives in defines its pose, and the vertical FOV comes from the MJCF `fovy`. The horizontal FOV follows from the `width`/`height` aspect ratio (square pixels). These cameras are always created and ignore the `enabled` flag.
+Every MuJoCo `<camera>` declared under a `<reference>` body automatically spawns a depth-camera node named after the camera. The body the camera lives in defines its pose, and the camera projection comes from the MJCF camera attributes. For an `fovy`-only camera, the horizontal FOV follows from the render aspect ratio. These cameras are always created and ignore the `enabled` flag.
+
+For fixed `<camera>` elements, a nonzero MJCF `resolution` sets the published
+image dimensions. When `sensorsize` and focal/principal intrinsics are specified,
+the resulting `camera_info` is computed from those MJCF intrinsics. Color images
+are published with `8UC3` encoding and BGR-ordered bytes.
 
 ```xml
 <reference name="camera_link">

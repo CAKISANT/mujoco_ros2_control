@@ -70,6 +70,14 @@ namespace mujoco_rgbd_camera {
         depth_id_ = depth_id;
         have_color_ = optical_id_ >= 0;
         have_depth_ = depth_id_ >= 0;
+        if (mount_ == Mount::FixedCamera) {
+            const int model_width = mujoco_model_->cam_resolution[2 * depth_id_];
+            const int model_height = mujoco_model_->cam_resolution[2 * depth_id_ + 1];
+            if (model_width > 0 && model_height > 0) {
+                width_ = model_width;
+                height_ = model_height;
+            }
+        }
 
         // The GL framebuffer is normally the published resolution. For a site
         // camera with an independent fovx (> 0), MuJoCo can only render square
@@ -255,7 +263,19 @@ namespace mujoco_rgbd_camera {
     void MujocoDepthCamera::set_camera_intrinsics(const mjrRect viewport) {
         // Intrinsics describe the published image (width_ x height_), not the GL
         // framebuffer (which may differ when fovx is set independently).
-        // vertical FOV: from the MJCF camera for <camera> mounts, from fovy for sites.
+        if (mount_ == Mount::FixedCamera) {
+            const float* sensor_size = mujoco_model_->cam_sensorsize + 2 * depth_id_;
+            const float* intrinsic = mujoco_model_->cam_intrinsic + 4 * depth_id_;
+            if (sensor_size[0] > 0.0f && sensor_size[1] > 0.0f) {
+                fx_ = intrinsic[0] / sensor_size[0] * width_;
+                fy_ = intrinsic[1] / sensor_size[1] * height_;
+                cx_ = width_ / 2.0 - intrinsic[2] / sensor_size[0] * width_;
+                cy_ = height_ / 2.0 + intrinsic[3] / sensor_size[1] * height_;
+                return;
+            }
+        }
+
+        // Vertical FOV: from the MJCF camera for <camera> mounts, from fovy for sites.
         const double fovy_deg = (mount_ == Mount::Site)
             ? fovy_
             : mujoco_model_->cam_fovy[depth_id_];
