@@ -214,6 +214,16 @@ ament_export_libraries(
 pluginlib_export_plugin_description_file(mujoco_ros2_control mujoco_system_plugins.xml)
 
 # Finalize package
+find_package(rosidl_default_generators REQUIRED)
+
+# ServeManual is used by air_hockey_sim/scripts/puck_serve_node.py and player_ui.py.
+rosidl_generate_interfaces(${PROJECT_NAME}_interfaces
+  "srv/ServeManual.srv"
+  LIBRARY_NAME ${PROJECT_NAME}
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+
 ament_package()
 
 #############

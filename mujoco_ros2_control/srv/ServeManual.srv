@@ -1,0 +1,6 @@
+# Serve the puck with a typed playfield velocity. Each component must be from 0 to 1 m/s.
+float64 vx
+float64 vy
+---
+bool success
+string message
