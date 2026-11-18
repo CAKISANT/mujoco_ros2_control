@@ -492,6 +492,11 @@ namespace mujoco_ros2_control {
                         pid.prev_error = velocity_error;
                     }
                 }
+            } else if (actuators.find(VELOCITY) != actuators.end()) {
+                // No controller commands the velocity: drop the last velocity setpoint so
+                // the velocity actuator only damps (e.g. after a feed-forward controller
+                // was switched off).
+                mujoco_data_->ctrl[actuators[VELOCITY]] = 0.0;
             }
 
             // Acceleration Control (Only when also Position and Velocity)

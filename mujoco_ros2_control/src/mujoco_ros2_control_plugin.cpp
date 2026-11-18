@@ -55,6 +55,8 @@ int const kSchedPriority = 50;
 
 // The puck hooks assume the air-hockey model has a free joint named "puck_free".
 char const kPuckJointName[] = "puck_free";
+// /sim/puck_shot also accepts velocities in the frame of this body.
+char const kPlayfieldBodyName[] = "playfield";
 // How long /sim/puck_reset waits for the simulation thread to apply the reset.
 auto const kPuckResetTimeout = std::chrono::seconds(2);
 
@@ -106,6 +108,13 @@ MujocoRos2Control::MujocoRos2Control(rclcpp::Node::SharedPtr &node) : nh_(node) 
     RCLCPP_WARN(nh_->get_logger(),
                 "Model has no free joint '%s'; /sim/puck_reset and /sim/puck_shot will be refused",
                 kPuckJointName);
+  }
+  // Shots in the playfield frame are rotated with this body into the world frame.
+  playfield_body_id_ = mj_name2id(mujoco_model_, mjOBJ_BODY, kPlayfieldBodyName);
+  if (puck_joint_id_ >= 0 && playfield_body_id_ < 0) {
+    RCLCPP_WARN(nh_->get_logger(),
+                "Model has no body '%s'; /sim/puck_shot accepts only the 'world' frame",
+                kPlayfieldBodyName);
   }
   puck_reset_service_ = nh_->create_service<std_srvs::srv::Trigger>(
       "/sim/puck_reset",
@@ -618,8 +627,14 @@ void mujoco_ros2_control::MujocoRos2Control::puckShotCallback(
     return;
   }
   const std::string & frame = message->header.frame_id;
-  if (frame != "world") {
-    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot in frame '%s'; use 'world'", frame.c_str());
+  if (frame != "world" && frame != kPlayfieldBodyName) {
+    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot in frame '%s'; use 'world' or '%s'",
+                frame.c_str(), kPlayfieldBodyName);
+    return;
+  }
+  if (frame == kPlayfieldBodyName && playfield_body_id_ < 0) {
+    RCLCPP_WARN(nh_->get_logger(), "Ignoring /sim/puck_shot in frame '%s': the model has no such body",
+                kPlayfieldBodyName);
     return;
   }
   const auto & linear = message->twist.linear;
@@ -654,12 +669,18 @@ void mujoco_ros2_control::MujocoRos2Control::applyPendingPuckCommands() {
       resetPuckToOrigin();
     }
     if (shot) {
-      // The shot is already in the MuJoCo world frame, so it is written directly.
+      // The linear velocity of a free joint is in the world frame; a playfield shot is
+      // rotated with the current playfield body orientation (xmat maps body to world).
       const auto & linear = shot->twist.linear;
+      const mjtNum velocity[3] = {linear.x, linear.y, linear.z};
+      mjtNum world_velocity[3] = {linear.x, linear.y, linear.z};
+      if (shot->header.frame_id == kPlayfieldBodyName) {
+        mju_mulMatVec3(world_velocity, mujoco_data_->xmat + 9 * playfield_body_id_, velocity);
+      }
       const int dof_adr = mujoco_model_->jnt_dofadr[puck_joint_id_];
-      mujoco_data_->qvel[dof_adr + 0] = linear.x;
-      mujoco_data_->qvel[dof_adr + 1] = linear.y;
-      mujoco_data_->qvel[dof_adr + 2] = linear.z;
+      for (int i = 0; i < 3; ++i) {
+        mujoco_data_->qvel[dof_adr + i] = world_velocity[i];
+      }
       for (int i = 3; i < 6; ++i) {
         mujoco_data_->qvel[dof_adr + i] = 0.0;
       }

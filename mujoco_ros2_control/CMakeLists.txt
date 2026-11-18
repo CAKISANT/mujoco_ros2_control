@@ -137,6 +137,7 @@ add_executable(${PROJECT_NAME}
 
 ament_target_dependencies(${PROJECT_NAME}
     controller_manager
+    geometry_msgs
     hardware_interface
     rclcpp
     urdf

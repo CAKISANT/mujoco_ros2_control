@@ -256,7 +256,8 @@ namespace mujoco_ros2_control
         /**
          * @brief Topic /sim/puck_shot: queues a one-shot puck velocity, applied at the next physics step.
          *
-         * The frame must be "world" (the MuJoCo world frame). Angular velocity is set to zero.
+         * The frame must be "world" (the MuJoCo world frame) or "playfield" (the MuJoCo body of
+         * that name; rotated into the world frame when applied). Angular velocity is set to zero.
          */
         void puckShotCallback(const geometry_msgs::msg::TwistStamped::SharedPtr message);
 
@@ -291,6 +292,7 @@ namespace mujoco_ros2_control
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr puck_reset_service_; ///< /sim/puck_reset
         rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr puck_shot_subscription_; ///< /sim/puck_shot
         int puck_joint_id_{-1}; ///< Free-joint id of the puck, -1 if the model has no such joint
+        int playfield_body_id_{-1}; ///< Body "playfield" for shots in that frame, -1 if missing
         // Requests from the service and topic callbacks, consumed by the simulation thread.
         std::mutex puck_command_mutex_;
         std::condition_variable puck_command_cv_;
